@@ -2,7 +2,7 @@
 """
 pico baseline JPEG decoder
 
-Copyright(c) 2016 yohhoy
+Copyright (c) 2017 yohhoy
 """
 import math
 import sys
@@ -28,7 +28,7 @@ ZZ = [ 0,  1,  5,  6, 14, 15, 27, 28,
       21, 34, 37, 47, 50, 56, 59, 61,
       35, 36, 48, 49, 57, 58, 62, 63]
 
-# 8x8 IDCT matrix
+# 8x8 Inverse DCT matrix
 IDCT = [0.0] * 64
 for i in range(64):
     y, x = i / 8, i % 8
@@ -202,21 +202,21 @@ def parse_stream(r):
                 # 'Start Of Image', 'End Image' markers
                 print(f'{m}')
             elif m[:3] == 'SOF':
-                # 'Start Of Frame' markers
+                # 'Start Of Frame' marker
                 n = b - MSYM['SOF0']
                 parse_SOFn(r, n)
                 #assert n == 0, "support only SOF0/Baseline DCT"
             elif m == 'DQT':
-                # 'Define quantization tables' markers
+                # 'Define quantization tables' marker
                 parse_DQT(r)
             elif m == 'DHT':
-                # 'Define Huffman tables' markers
+                # 'Define Huffman tables' marker
                 parse_DHT(r)
             elif m == 'DAC':
-                # 'Define arithmetic coding conditionings' markers
+                # 'Define arithmetic coding conditionings' marker
                 assert False, "Arithmetic coding is not supported"
             elif m == 'SOS':
-                # 'Start of scan' markers
+                # 'Start of scan' marker
                 parse_SOS(r)
             elif m[:3] == 'APP':
                 # 'Reserved for application segments' markers
