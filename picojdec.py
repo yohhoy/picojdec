@@ -14,9 +14,9 @@ MSYM = {'SOF0': 0xC0, 'SOF1': 0xC1, 'SOF2': 0xC2, 'SOF3': 0xC3, 'SOF5': 0xC5,
         'SOF11': 0xCB, 'SOF13': 0xCD, 'SOF14': 0xCE, 'SOF15': 0xCF,
         'DHT': 0xC4, 'DAC': 0xCC, 'SOI': 0xD8, 'EOI': 0xD9, 'SOS': 0xDA,
         'DQT': 0xDB, 'DNL': 0xDC, 'DRI': 0xDD, 'DHP': 0xDE, 'EXP': 0xDF, 'COM': 0xFE}
-MSYM.update(dict([(f'RST{m}', 0xD0 + m) for m in range(8)]))   # RST0..RST7
-MSYM.update(dict([(f'APP{n}', 0xE0 + n) for n in range(16)]))  # APP0..APP15
-MSYM.update(dict([(f'JPG{n}', 0xF0 + n) for n in range(14)]))  # APP0..APP13
+MSYM.update({f'RST{m}': 0xD0 + m for m in range(8)})   # RST0..RST7
+MSYM.update({f'APP{n}': 0xE0 + n for n in range(16)})  # APP0..APP15
+MSYM.update({f'JPG{n}': 0xF0 + n for n in range(14)})  # APP0..APP13
 
 # Zig-zag sequence
 ZZ = [ 0,  1,  5,  6, 14, 15, 27, 28,
