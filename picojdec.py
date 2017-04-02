@@ -5,6 +5,7 @@ pico baseline JPEG decoder
 Copyright (c) 2017 yohhoy
 """
 import math
+import struct
 import sys
 
 
@@ -28,18 +29,6 @@ ZZ = [0,  1,  5,  6,  14, 15, 27, 28,
       21, 34, 37, 47, 50, 56, 59, 61,
       35, 36, 48, 49, 57, 58, 62, 63]
 
-# 8x8 Inverse DCT matrix
-IDCT = [0.0] * 64
-for i in range(64):
-    y, x = i // 8, i % 8
-    PI = math.pi / 16.0
-    for j in range(64):
-        v, u = j // 8, j % 8
-        cu = 1.0 / math.sqrt(2) if u == 0 else 1.0
-        cv = 1.0 / math.sqrt(2) if v == 0 else 1.0
-        IDCT[i] += cu * cv * math.cos((2 * x + 1) * u * PI) * math.cos((2 * y + 1) * v * PI)
-    IDCT[i] /= 4.0
-
 
 class NoMoreData(Exception):
     pass
@@ -47,7 +36,6 @@ class NoMoreData(Exception):
 # byte/bit stream reader
 class Reader():
     def __init__(self, filename):
-        self.filename = self
         self.fs = open(filename, 'rb')
         self.blen = 0
         self.bbuf = 0
@@ -89,8 +77,8 @@ class Reader():
 class HuffmanDecoder():
     def __init__(self, hufftbl):
         self.huffval, self.huffsize, self.huffcode = hufftbl
-    # decode single value
-    def decode(self, r):
+    # decode Huffman code
+    def code(self, r):
         code, sz = 0, 0
         for i, n in enumerate(self.huffsize):
             if sz < n:
@@ -100,6 +88,13 @@ class HuffmanDecoder():
                 print(f'Huffman: {code:0{sz}b} -> {self.huffval[i]}')
                 return self.huffval[i]
         assert False, "broken Huffman code"
+    # decode one value
+    def value(self, r, n):
+        b = r.bits(n)
+        if b < (1 << (n - 1)):
+            return b - ((1 << n) - 1)  # neg. value
+        else:
+            return b  # pos. value
 
 
 # decode HUFFVAL/HUFFSIZE/HUFFCODE
@@ -133,40 +128,34 @@ def decode_hufftable(v):
 
 
 # DC code table
-def decode_dccode(r, hdec):
-    ssss = hdec.decode(r)
+def decode_dccode(r, hdec, pred):
+    ssss = hdec.code(r)
     if ssss == 0:
-        print('DC val=0')
-        return 0
-    b = r.bits(ssss)
-    if b < (1 << (ssss - 1)):
-        val = b - ((1 << ssss) - 1)
-    else:
-        val = b
-    print(f'DC s={ssss} b={b:0{ssss}b} val={val:+d}')
-    return val
+        print('DC diff=+0 pred={pred:+d}')
+        return pred
+    assert ssss <= 15, "DC magnitude category <= 15"
+    diff = hdec.value(r, ssss)
+    print(f'DC s={ssss} diff={diff:+d} pred={pred:+d}')
+    return diff + pred
 
 
 # AC code table
 def decode_accode(r, hdec):
-    rs = hdec.decode(r)
+    rs = hdec.code(r)
     rrrr, ssss = rs >> 4, rs & 0b1111
     if ssss == 0:
         print('AC ' + 'EOB' if rrrr == 0 else 'ZRL')
         return (rrrr, 0)  # EOB/ZRL
-    b = r.bits(ssss)
-    if b < (1 << (ssss - 1)):
-        val = b - ((1 << ssss) - 1)
-    else:
-        val = b
-    print(f'AC r={rrrr} s={ssss} b={b:0{ssss}b} val={val:+d}')
+    val = hdec.value(r, ssss)
+    print(f'AC r={rrrr} s={ssss} val={val:+d}')
     return (rrrr, val)
 
 
 # inverse DCT
 def idct(coeff):
+    def cos16(x):
+        return math.cos(x * math.pi / 16)
     block = [0] * 64
-    cos = lambda x: math.cos(x * math.pi / 16)
     for i in range(64):
         y, x = i // 8, i % 8
         s = 0
@@ -174,84 +163,93 @@ def idct(coeff):
             v, u = j // 8, j % 8
             cu = 1 / math.sqrt(2) if u == 0 else 1
             cv = 1 / math.sqrt(2) if v == 0 else 1
-            s += cu * cv * coeff[j] * cos((2 * x + 1) * u) * cos((2 * y + 1) * v)
-        block[i] = int(s / 4)
+            s += cu * cv * coeff[j] * cos16((2 * x + 1) * u) * cos16((2 * y + 1) * v)
+        block[i] = s / 4
     return block
+
+
+# decode 8x8 block
+def decode_block8x8(r, hdec, pred, qtbl, bpp):
+    sq = [0] * 64
+    # decode DC coefficient
+    sq[0] = decode_dccode(r, hdec[0], pred)
+    pred = sq[0]
+    # decode AC coefficients (in Zig-Zag order)
+    k = 1
+    while k < 64:
+        run, val = decode_accode(r, hdec[1])
+        if (run, val) == (0, 0):  # EOB
+            break
+        k += run
+        assert k < 64, f'out of range: k={k} run/val={run}/{val}'
+        sq[k] = val
+        k += 1
+    print(f'  Sq={sq[:k]}...')
+    # dequantize
+    for i in range(64):
+        sq[i] *= qtbl[i]
+    print(f'  Rz={sq[:k]}...')
+    # reorder Zig-Zag to coding order
+    coeff = [0] * 64
+    for i, z in enumerate(ZZ):
+        coeff[i] = sq[z]
+    print(f'  Ri=' + str([coeff[i:i + 8] for i in range(0, 64, 8)]))
+    # inverse DCT
+    block = idct(coeff)
+    # level shift
+    shift = 1 << (bpp - 1)
+    maxval = (1 << bpp) - 1
+    for i in range(64):
+        block[i] = min(max(0, round(block[i] + shift)), maxval)
+    print(f'  I=' + str([block[i:i + 8] for i in range(0, 64, 8)]))
+    return (block, pred)
 
 
 # Entropy-coded data segments
 def decode_scan(r, image, scan):
     assert scan['SS'] == (0, 63), "SpectralSelection is not supported"
     assert scan['SA'] == (0, 0), "SuccessiveApproximation is not supported"
-    # component list in MCU
-    mcu_cs = []
+
+    nmcu = image['F']['nmcu']
+    bpp = image['F']['bit']  # bit per pixel
+    recimg = image['I']
+
+    # components in current scan
+    scan_component = []
     for sc in scan['C']:
-        mcu_cs += [c for c in image['C'] if c['C'] == sc['Cs']]
-    # component index of blocks in MCU
-    mcu_ci = []
-    for c in mcu_cs:
-        mcu_ci += [c['i']] * (c['H'] * c['V'])
+        scan_component += [c for c in image['C'] if c['C'] == sc['Cs']]
+    # block list in MCU
+    blocks = []
+    for c in scan_component:
+        for cv in range(c['V']):
+            for ch in range(c['H']):
+                blocks.append((c['i'], ch, cv))
     # set QuantizationTables
     qtbl = []
-    for c in mcu_cs:
+    for c in scan_component:
         qtbl.append(image['QT'][c['Tq']])
     # initalize HuffmanDecoders
     hdec = []
     for c in scan['C']:
-        hdec.append(HuffmanDecoder(image['HT'][c['Td'] * 2    ]))  # DC
+        hdec.append(HuffmanDecoder(image['HT'][c['Td'] * 2]))      # DC
         hdec.append(HuffmanDecoder(image['HT'][c['Ta'] * 2 + 1]))  # AC
-    # DC predictors
+    # reset DC predictors
     pred = [0] * len(scan)
 
-    shift = 1 << (image['F']['bit'] - 1)
-    maxval = (1 << image['F']['bit']) - 1
-    rec = image['I']
-
-    # decode MCU
-    nmcu = image['F']['nmcu']
+    # decode MCUs
     for mcu_idx in range(nmcu[0] * nmcu[1]):
         mcu_y, mcu_x = mcu_idx // nmcu[0], mcu_idx % nmcu[0]
-        ci = 0  # TODO: support multiple component
-        sq = [0] * 64
-        # decode DC coefficient
-        sq[0] = decode_dccode(r, hdec[ci * 2]) + pred[ci]
-        pred[ci] = sq[0]
-        # decode AC coefficients (in Zig-Zag order)
-        k = 1
-        while k < 64:
-            run, val = decode_accode(r, hdec[ci * 2 + 1])
-            if (run, val) == (0, 0):  # EOB
-                break
-            k += run
-            assert k < 64, f'out of range: k={k} run/val={run}/{val}'
-            sq[k] = val
-            k += 1
-        print(f'{mcu_idx:4d}: Sq={sq[:k]}...')
-        # dequantize
-        for i in range(64):
-            sq[i] *= qtbl[ci][i]
-        print(f'{mcu_idx:4d}: Rz={sq[:k]}...')
-        # inverse Zig-Zag scan
-        coeff = [0] * 64
-        for i, z in enumerate(ZZ):
-            coeff[i] = sq[z]
-        print(f'{mcu_idx:4d}: Ri=' + str([coeff[i:i + 8] for i in range(0, 64, 8)]))
-        # inverse DCT
-        block = idct(coeff)
-        # level shift
-        for i in range(64):
-            block[i] = max(0, min(block[i] + shift, maxval))
-        print(f'{mcu_idx:4d}:  I=' + str([block[i:i + 8] for i in range(0, 64, 8)]))
-        # dump PGM
-        for i in range(64):
-            rec_x = mcu_x * 8 + i % 8
-            rec_y = mcu_y * 8 + i // 8
-            rec[rec_y * image['F']['size'][0] + rec_x] = block[i]
-        if mcu_x == nmcu[0] - 1:
-            with open(f'mcu{mcu_idx:04d}.pgm', 'wb') as f:
-                f.write('P5\n{0[0]} {0[1]}\n255\n'.format(image['F']['size']).encode('ascii'))
-                for px in rec:
-                    f.write(px.to_bytes(1, 'big'))
+        for ci, bx, by in blocks:
+            # decode 8x8 block
+            blk_x = mcu_x * scan_component[ci]['H'] + bx
+            blk_y = mcu_y * scan_component[ci]['V'] + by
+            print(f'MCU#{mcu_idx}: C[{ci}] pos={blk_x},{blk_y}')
+            blkimg, pred[ci] = decode_block8x8(r, hdec[ci * 2:ci * 2 + 2], pred[ci], qtbl[ci], bpp)
+            # copy 8x8 block to image
+            stride = scan_component[ci]['size'][0]
+            for i in range(8):
+                offset = (blk_y * 8 + i) * stride + blk_x * 8
+                recimg[ci][offset:offset + 8] = blkimg[i * 8:(i + 1) * 8]
 
 
 # Frame header
@@ -281,7 +279,15 @@ def parse_SOFn(r, n, image):
     nmcu = (math.ceil(x / mcu_h), math.ceil(y / mcu_v))
     image['F'] = {'bit': p, 'size': (x, y), 'nmcu': nmcu}
     image['C'] = component
-    image['I'] = [0] * (mcu_h * nmcu[0] * mcu_v * nmcu[1])
+    for c in image['C']:
+        c['size'] = (nmcu[0] * c['H'] * 8, nmcu[1] * c['V'] * 8)
+    # allocate reconstruct image buffer
+    image['I'] = []
+    shift = 1 << (p - 1)  # Y=gray / CbCr=zero
+    for c in component:
+        rec_x, rec_y = nmcu[0] * c['H'] * 8, nmcu[1] * c['V'] * 8
+        image['I'].append([shift] * (rec_x * rec_y))
+        print('  RecImg[{}]: C={} size={}x{}'.format(c['i'], c['C'], rec_x, rec_y))
 
 
 # Scan header
@@ -305,7 +311,7 @@ def parse_SOS(r, image):
     assert ls == 0, "invalid SOS payload"
     # check HuffmanTables
     for sc in component:
-        assert image['HT'][sc['Td'] * 2    ], "HuffmanTable/DC does not found"
+        assert image['HT'][sc['Td'] * 2], "HuffmanTable/DC does not found"
         assert image['HT'][sc['Ta'] * 2 + 1], "HuffmanTable/AC does not found"
     # SS=spectral selection, SA=successive approximation
     return {'SS': (ss, se), 'SA': (ah, al), 'C': component}
@@ -392,6 +398,7 @@ def parse_APPn(r, n):
         print(f'APP{n}: La={la} Ap={ap}')
 
 
+# parse JPEG bytestream
 def parse_stream(r):
     M = {v: k for k, v in MSYM.items()}  # X'FFxx' -> marker symbol
     try:
@@ -414,12 +421,12 @@ def parse_stream(r):
             elif m == 'EOI':
                 # 'End of image' marker
                 print(f'{m}')
-                image = None
+                return image
             elif m[:3] == 'SOF':
                 # 'Start of frame' markers
                 n = b - MSYM['SOF0']
                 frame = parse_SOFn(r, n, image)
-                #assert n == 0, "support only SOF0/Baseline DCT"
+                assert n == 0, "support only SOF0/Baseline DCT"
             elif m == 'DQT':
                 # 'Define quantization tables' marker
                 parse_DQT(r, image)
@@ -443,14 +450,58 @@ def parse_stream(r):
         pass
 
 
-def main(filename):
-    with Reader(filename) as r:
-        parse_stream(r)
+# YCbCr to RGB (BT.601 8bit)
+def to_rgb(y, cb, cr):
+    cb -= 128
+    cr -= 128
+    r = min(max(0, round(y               + 1.402  * cr)), 255)
+    g = min(max(0, round(y - 0.3441 * cb - 0.7141 * cr)), 255)
+    b = min(max(0, round(y + 1.772  * cb              )), 255)
+    return (r, g, b)
+
+
+# write image to PPM (portable pixmal format) file
+def write_ppm(image, outfile):
+    width, height = image['F']['size']
+    recimg = image['I']
+
+    nc = len(image['C'])
+    if nc == 1:
+        print(f'Y size={width}x{height}')
+    elif nc == 3:
+        # chroma downsample factor
+        ds_h = image['C'][0]['H'] // image['C'][1]['H']
+        ds_v = image['C'][0]['V'] // image['C'][1]['V']
+        print(f'YCbCr size={width}x{height} chroma={ds_h}x{ds_v}')
+    else:
+        assert False, "unknown color space"
+
+    # write PPM file
+    with open(outfile, 'wb') as f:
+        f.write(f'P6\n{width} {height}\n255\n'.encode('ascii'))
+        for y in range(height):
+            for x in range(width):
+                luma = recimg[0][y * width + x]
+                if nc == 3:
+                    offset = (y // ds_v) * (width // ds_h) + (x // ds_h)
+                    cb = recimg[1][offset]
+                    cr = recimg[2][offset]
+                else:
+                    cb = cr = 128
+                rgb = to_rgb(luma, cb, cr)
+                f.write(struct.pack('3B', *rgb))
+
+
+def main(infile, outfile = None):
+    with Reader(infile) as r:
+        image = parse_stream(r)
+        if outfile:
+            write_ppm(image, outfile)
 
 
 if __name__ == '__main__':
     args = sys.argv[1:]
-    if len(args) != 1:
-        print('usage: picojdec.py <input.jpg>')
+    if len(args) < 1:
+        print('usage: picojdec.py <input.jpg> [<output.ppm>]')
         exit(1)
-    main(args[0])
+    main(*args)
