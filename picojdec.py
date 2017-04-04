@@ -151,8 +151,8 @@ def decode_accode(r, hdec):
     return (rrrr, val)
 
 
-# inverse DCT
-def idct(coeff):
+# inverse DCT (naive formula implementation in CCITT Rec. T.81)
+def idct_naive(coeff):
     def cos16(x):
         return math.cos(x * math.pi / 16)
     block = [0] * 64
@@ -166,6 +166,24 @@ def idct(coeff):
             s += cu * cv * coeff[j] * cos16((2 * x + 1) * u) * cos16((2 * y + 1) * v)
         block[i] = s / 4
     return block
+
+# inverse DCT (LUT implementation)
+COS_LUT = [[math.cos((2 * xy + 1) * uv * math.pi / 16) for uv in range(8)] for xy in range(8)]
+INVSQRT2 = 1 / math.sqrt(2)
+def idct_lut(coeff):
+    block = [0] * 64
+    for i in range(64):
+        y, x = i // 8, i % 8
+        s = 0
+        for j in range(64):
+            v, u = j // 8, j % 8
+            cu = INVSQRT2 if u == 0 else 1
+            cv = INVSQRT2 if v == 0 else 1
+            s += cu * cv * coeff[j] * COS_LUT[x][u] * COS_LUT[y][v]
+        block[i] = s / 4
+    return block
+
+idct = idct_lut
 
 
 # decode 8x8 block
