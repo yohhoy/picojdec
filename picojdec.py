@@ -33,6 +33,10 @@ ZZ = [0,  1,  5,  6,  14, 15, 27, 28,
 class NoMoreData(Exception):
     pass
 
+class BrokenByteStuff(Exception):
+    def __init__(self, stuff):
+        self.stuff = stuff
+
 # byte/bit stream reader
 class Reader():
     def __init__(self, filename):
@@ -58,7 +62,7 @@ class Reader():
                     # X'FF00' -> 0xff(256)
                     stuff = self.fs.read(1)
                     if stuff != b'\x00':
-                        raise NoMoreData()
+                        raise BrokenByteStuff(stuff)
                 self.bbuf = int.from_bytes(b, 'big')
                 self.blen = 8
             m = min(n, self.blen)
@@ -67,6 +71,9 @@ class Reader():
             self.blen -= m
             n -= m
         return ret
+    # byte aligned?
+    def byte_aligned(self):
+        return self.blen == 0
     def __enter__(self):
         return self
     def __exit__(self, type, value, traceback):
@@ -131,7 +138,7 @@ def decode_hufftable(v):
 def decode_dccode(r, hdec, pred):
     ssss = hdec.code(r)
     if ssss == 0:
-        print('DC diff=+0 pred={pred:+d}')
+        print(f'DC diff=0 pred={pred:+d}')
         return pred
     assert ssss <= 15, "DC magnitude category <= 15"
     diff = hdec.value(r, ssss)
@@ -251,12 +258,25 @@ def decode_scan(r, image, scan):
     for c in scan['C']:
         hdec.append(HuffmanDecoder(image['HT'][c['Td'] * 2]))      # DC
         hdec.append(HuffmanDecoder(image['HT'][c['Ta'] * 2 + 1]))  # AC
-    # reset DC predictors
+    # initialize DC predictors
     pred = [0] * len(scan)
 
     # decode MCUs
+    reset_interval = image['RI']
+    MRST = {v: k for k, v in MSYM.items() if k[:3] == 'RST'}
     for mcu_idx in range(nmcu[0] * nmcu[1]):
         mcu_y, mcu_x = mcu_idx // nmcu[0], mcu_idx % nmcu[0]
+        if 0 < reset_interval and 0 < mcu_idx and mcu_idx % reset_interval == 0:
+            # align byte
+            while not r.byte_aligned():
+                b = r.bits(1)
+                assert b == 1, 'invalid bits for byte alignment'
+            # read restart marker
+            marker = r.byte_raw(2)
+            assert marker[0] == 0xFF and marker[1] in MRST, 'invalid RSTm marker'
+            print(MRST[marker[1]])
+            # reset DC predictors
+            pred = [0] * len(scan)
         for ci, bx, by in blocks:
             # decode 8x8 block
             blk_x = mcu_x * scan_component[ci]['H'] + bx
@@ -395,6 +415,16 @@ def parse_DHT(r, image):
     assert lh == 0, "invalid DHT payload"
 
 
+# Restart interval definition syntax
+def parse_DRI(r, image):
+    lr = r.byte(2)
+    ri = r.byte(2)
+    print(f'DRI: Lr={lr} Ri={ri}')
+    lr -= 4
+    assert lr == 0, 'invalid DRI payload'
+    image['RI'] = ri
+
+
 # Application data
 def parse_APPn(r, n):
     la = r.byte(2)
@@ -418,7 +448,7 @@ def parse_APPn(r, n):
 
 # parse JPEG bytestream
 def parse_stream(r):
-    M = {v: k for k, v in MSYM.items()}  # X'FFxx' -> marker symbol
+    MARKER = {v: k for k, v in MSYM.items()}  # X'FFxx' -> marker symbol
     try:
         image = None
         while True:
@@ -429,13 +459,14 @@ def parse_stream(r):
             b = r.byte(1)
             if b == 0x00:
                 continue
-            m = M.get(b, None)
+            m = MARKER.get(b, None)
             # parse marker
             if m == 'SOI':
                 # 'Start of image' marker
                 print(f'{m}')
                 image = {'QT': [None] * 4,  # QuantizationTable (0..3)
-                         'HT': [None] * 8}  # HuffmanTable (DC/AC, 0..3)
+                         'HT': [None] * 8,  # HuffmanTable (DC/AC, 0..3)
+                         'RI': 0}           # Reset interval
             elif m == 'EOI':
                 # 'End of image' marker
                 print(f'{m}')
@@ -454,6 +485,9 @@ def parse_stream(r):
             elif m == 'DAC':
                 # 'Define arithmetic coding conditionings' marker
                 assert False, "Arithmetic coding is not supported"
+            elif m == 'DRI':
+                # 'Define restart interval' marker
+                parse_DRI(r, image)
             elif m == 'SOS':
                 # 'Start of scan' marker
                 scan = parse_SOS(r, image)
