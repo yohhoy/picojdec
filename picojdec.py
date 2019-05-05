@@ -369,11 +369,11 @@ def parse_DQT(r, image):
         for k in range(64):
             q[k] = r.byte(n)
         print(f'  DQT[{t}]: Pq={pq} Tq={tq} Q_k={q}')
+        # register QuantizationTable
+        image['QT'][tq] = q
         lq -= 1 + 64 * n
         t += 1
     assert lq == 0, "invalid DQT payload"
-    # register QuantizationTable
-    image['QT'][tq] = q
 
 
 # Huffman table-specification
